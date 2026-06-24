@@ -1,0 +1,15 @@
+{
+  "name": "rung-api",
+  "private": true,
+  "type": "module",
+  "description": "RUNG competitive backend — Cloudflare Worker + D1 (server-authoritative scoring, leaderboards, Sign in with Apple).",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "types": "wrangler types"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "wrangler": "^4.0.0"
+  }
+}

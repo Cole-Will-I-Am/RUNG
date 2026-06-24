@@ -12,6 +12,11 @@ DerivedData/
 .build/
 Package.resolved
 
+# Node / Cloudflare Worker backend (server/)
+node_modules/
+.wrangler/
+*.tsbuildinfo
+
 # Secrets — never commit
 *.env
 .secrets/
