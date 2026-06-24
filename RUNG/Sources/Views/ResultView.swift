@@ -9,7 +9,7 @@ struct ResultView: View {
         VStack(spacing: Metrics.s6) {
             Spacer()
             if let r = store.lastResult {
-                Text("Day \(r.dayIndex + 1)")
+                Text(store.isPractice ? "Practice" : "Day \(r.dayIndex + 1)")
                     .font(Type.label)
                     .foregroundStyle(Palette.onPaperSecondary)
 
@@ -24,6 +24,16 @@ struct ResultView: View {
                     .multilineTextAlignment(.center)
                     .foregroundStyle(Palette.onPaperPrimary)
                     .padding(.horizontal, Metrics.s4)
+
+                if store.isPractice {
+                    Text("Practice — this run isn't ranked.")
+                        .font(Type.caption)
+                        .foregroundStyle(Palette.onPaperSecondary)
+                } else if let sr = store.serverResult {
+                    Text("You're #\(sr.rank) — top \(max(1, Int((100 - sr.percentile).rounded())))% today.")
+                        .font(Type.body)
+                        .foregroundStyle(Palette.onPaperPrimary)
+                }
 
                 HStack(spacing: Metrics.s8) {
                     statCell("peak", ShareCard.mult(r.peakMultiplier))

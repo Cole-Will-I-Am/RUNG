@@ -69,11 +69,13 @@ struct HomeView: View {
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, Metrics.s2)
-                    SecondaryButton(title: "Practice run", mode: .paper) {
-                        store.startCountdown(practice: true)
-                    }
                 } else {
-                    PrimaryButton(title: "Play") { store.startCountdown() }
+                    PrimaryButton(title: "Play today's board") { store.startCountdown() }
+                }
+
+                // Practice (Endless) is always available — random boards, unranked.
+                SecondaryButton(title: "Practice — unlimited", mode: .paper) {
+                    store.startCountdown(practice: true)
                 }
 
                 HStack(spacing: Metrics.s3) {
@@ -81,7 +83,7 @@ struct HomeView: View {
                     SecondaryButton(title: "Leaderboard", mode: .paper) { showLeaderboard = true }
                 }
 
-                Text("Global and friends boards are coming. For now, climb your own best.")
+                Text("Practice runs use random boards and don't affect your rank.")
                     .font(Type.caption)
                     .foregroundStyle(Palette.onPaperSecondary)
                     .frame(maxWidth: .infinity, alignment: .center)

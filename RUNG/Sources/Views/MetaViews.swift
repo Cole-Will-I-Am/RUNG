@@ -1,4 +1,5 @@
 import SwiftUI
+import AuthenticationServices
 
 // Calm Paper-mode meta screens (§5.1): onboarding, stats, leaderboard, settings.
 
@@ -99,59 +100,70 @@ struct StatsView: View {
 struct LeaderboardView: View {
     @EnvironmentObject var store: GameStore
     @Environment(\.dismiss) private var dismiss
+    @State private var period = "daily"
 
     var body: some View {
-        let ranked = store.stats.history.sorted { $0.finalScore > $1.finalScore }
         VStack(alignment: .leading, spacing: Metrics.s4) {
             SheetHeader(title: "Leaderboard") { dismiss() }
-            Text("Global and friends boards are coming. Until then, here are your best climbs.")
-                .font(Type.caption)
-                .foregroundStyle(Palette.onPaperSecondary)
 
-            if ranked.isEmpty {
+            Picker("", selection: $period) {
+                Text("Today").tag("daily")
+                Text("All-time").tag("alltime")
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: period) { _, p in store.fetchLeaderboard(period: p) }
+
+            if let me = store.leaderboard?.me, period == "daily" {
+                Text("You're #\(me.rank) — top \(topPercent(me.percentile))% today.")
+                    .font(Type.caption)
+                    .foregroundStyle(Palette.onPaperSecondary)
+            }
+
+            if let lb = store.leaderboard, !lb.entries.isEmpty {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(Array(lb.entries.enumerated()), id: \.offset) { i, e in
+                            row(rank: i + 1, e: e)
+                        }
+                    }
+                }
+            } else {
                 Spacer()
-                Text("No runs yet. Play today's board.")
+                Text(store.leaderboard == nil ? "Loading…" : "No scores yet. Be the first to climb.")
                     .font(Type.body)
                     .foregroundStyle(Palette.onPaperSecondary)
                     .frame(maxWidth: .infinity, alignment: .center)
                 Spacer()
-            } else {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(Array(ranked.prefix(20).enumerated()), id: \.offset) { i, r in
-                            row(rank: i + 1, r: r)
-                        }
-                    }
-                }
             }
             Spacer(minLength: 0)
         }
         .padding(Metrics.s6)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Palette.paper.ignoresSafeArea())
+        .onAppear { period = store.leaderboardPeriod; store.fetchLeaderboard(period: period) }
     }
 
-    private func row(rank: Int, r: RunResult) -> some View {
-        HStack {
+    private func topPercent(_ beaten: Double) -> Int { max(1, Int((100 - beaten).rounded())) }
+
+    private func row(rank: Int, e: LeaderboardEntry) -> some View {
+        let mine = e.id == store.account?.id
+        return HStack {
             Text("\(rank)")
                 .font(Type.instrumentStd)
                 .foregroundStyle(Palette.taupe)
                 .frame(width: 34, alignment: .leading)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Day \(r.dayIndex + 1)")
-                    .font(Type.body)
-                    .foregroundStyle(Palette.onPaperPrimary)
-                Text(r.outcome == .banked ? "banked at \(ShareCard.mult(r.bankedMultiplier))" : "pushed too far")
-                    .font(Type.caption)
-                    .foregroundStyle(Palette.onPaperSecondary)
-            }
+            Text(e.name)
+                .font(Type.body)
+                .foregroundStyle(Palette.onPaperPrimary)
             Spacer()
-            Text(ShareCard.decimal(r.finalScore))
+            Text(ShareCard.decimal(e.score))
                 .font(Type.instrumentStd)
                 .monospacedDigit()
                 .foregroundStyle(Palette.onPaperPrimary)
         }
         .padding(.vertical, Metrics.s3)
+        .padding(.horizontal, Metrics.s3)
+        .background(RoundedRectangle(cornerRadius: 10).fill(mine ? Palette.paperDeep : Color.clear))
         .overlay(Rectangle().fill(Palette.hairlineOnPaper).frame(height: 1), alignment: .bottom)
     }
 }
@@ -162,36 +174,79 @@ struct SettingsView: View {
     @EnvironmentObject var store: GameStore
     @Environment(\.dismiss) private var dismiss
     @State private var notify = false
+    @State private var rawNonce = ""
+    @State private var usernameInput = ""
+    @State private var usernameMsg: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Metrics.s6) {
-            SheetHeader(title: "Settings") { dismiss() }
+        ScrollView {
+            VStack(alignment: .leading, spacing: Metrics.s6) {
+                SheetHeader(title: "Settings") { dismiss() }
 
-            Toggle(isOn: $notify) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Daily reminder").font(Type.body).foregroundStyle(Palette.onPaperPrimary)
-                    Text("One calm notification when the board goes live.")
+                VStack(alignment: .leading, spacing: Metrics.s3) {
+                    Text("Account").font(Type.label).foregroundStyle(Palette.onPaperSecondary)
+                    if store.isSignedIn {
+                        Text("Signed in as \(store.account?.username ?? store.account?.display ?? "—")")
+                            .font(Type.body).foregroundStyle(Palette.onPaperPrimary)
+                        HStack(spacing: Metrics.s2) {
+                            TextField("username", text: $usernameInput)
+                                .textInputAutocapitalization(.never).autocorrectionDisabled()
+                                .font(Type.body).padding(.horizontal, Metrics.s3).frame(height: 44)
+                                .background(RoundedRectangle(cornerRadius: 10).fill(Palette.paperDeep))
+                            Button("Save") { Task { usernameMsg = await store.setUsername(usernameInput) } }
+                                .font(Type.label).foregroundStyle(Palette.onPaperPrimary)
+                        }
+                        if let m = usernameMsg {
+                            Text(m).font(Type.caption).foregroundStyle(Palette.onPaperSecondary)
+                        }
+                    } else {
+                        Text("Sign in to claim a username and compete under your name. Anonymous scores still rank — sign-in just makes it yours across devices.")
+                            .font(Type.caption).foregroundStyle(Palette.onPaperSecondary)
+                        SignInWithAppleButton(.signIn) { request in
+                            rawNonce = AppleSignIn.randomNonce()
+                            request.requestedScopes = [.fullName]
+                            request.nonce = AppleSignIn.sha256Hex(rawNonce)
+                        } onCompletion: { result in
+                            if case .success(let auth) = result,
+                               let cred = auth.credential as? ASAuthorizationAppleIDCredential,
+                               let data = cred.identityToken,
+                               let idToken = String(data: data, encoding: .utf8) {
+                                store.signInWithApple(identityToken: idToken, nonce: rawNonce)
+                            }
+                        }
+                        .signInWithAppleButtonStyle(.black)
+                        .frame(height: 46)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+                }
+
+                Rectangle().fill(Palette.hairlineOnPaper).frame(height: 1)
+
+                Toggle(isOn: $notify) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Daily reminder").font(Type.body).foregroundStyle(Palette.onPaperPrimary)
+                        Text("One calm notification when the board goes live.")
+                            .font(Type.caption).foregroundStyle(Palette.onPaperSecondary)
+                    }
+                }
+                .tint(Palette.ink)
+                .onChange(of: notify) { _, v in store.setNotifications(v) }
+
+                Rectangle().fill(Palette.hairlineOnPaper).frame(height: 1)
+
+                VStack(alignment: .leading, spacing: Metrics.s2) {
+                    Text("About").font(Type.label).foregroundStyle(Palette.onPaperSecondary)
+                    Text("RUNG is an early, experimental build. The name is a working title.")
                         .font(Type.caption).foregroundStyle(Palette.onPaperSecondary)
+                    Text("Version \(appVersion)")
+                        .font(Type.instrumentMicro).foregroundStyle(Palette.taupe)
                 }
             }
-            .tint(Palette.ink)
-            .onChange(of: notify) { _, v in store.setNotifications(v) }
-
-            Rectangle().fill(Palette.hairlineOnPaper).frame(height: 1)
-
-            VStack(alignment: .leading, spacing: Metrics.s2) {
-                Text("About").font(Type.label).foregroundStyle(Palette.onPaperSecondary)
-                Text("RUNG is an early, experimental build. The name is a working title.")
-                    .font(Type.caption).foregroundStyle(Palette.onPaperSecondary)
-                Text("Version \(appVersion)")
-                    .font(Type.instrumentMicro).foregroundStyle(Palette.taupe)
-            }
-            Spacer()
+            .padding(Metrics.s6)
         }
-        .padding(Metrics.s6)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Palette.paper.ignoresSafeArea())
-        .onAppear { notify = store.notificationsOn }
+        .onAppear { notify = store.notificationsOn; usernameInput = store.account?.username ?? "" }
     }
 
     private var appVersion: String {

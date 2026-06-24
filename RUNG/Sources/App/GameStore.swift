@@ -1,9 +1,10 @@
 import Foundation
 import Combine
 
-/// The app's central state: loads the bundled dictionary and today's deterministic
-/// board, drives the live run clock, and persists stats. The run rules all live in the
-/// pure `RunEngine` (unit-tested); this class is the timer + glue + navigation.
+/// The app's central state: loads the dictionary + today's deterministic board, drives
+/// the live run clock, persists local stats, and talks to the competitive backend
+/// (accounts, server-authoritative run submission, leaderboard). Run rules live in the
+/// pure `RunEngine`; this class is the timer + glue + navigation + networking.
 @MainActor
 final class GameStore: ObservableObject {
     enum Phase: Equatable { case loading, onboarding, home, countdown, run, result }
@@ -14,21 +15,37 @@ final class GameStore: ObservableObject {
     @Published private(set) var lastResult: RunResult?
     @Published private(set) var stats: PlayerStats
     @Published private(set) var loadFailed = false
-    /// A practice run does not count toward the daily once-per-day run, streak, or best.
+    /// A practice run uses a random board and does NOT count toward the daily run,
+    /// streak, best, or the leaderboard.
     @Published private(set) var isPractice = false
 
+    // Backend / competitive state
+    @Published private(set) var account: BackendAccount?
+    @Published private(set) var serverResult: RunResultResponse?
+    @Published private(set) var leaderboard: LeaderboardResponse?
+    @Published private(set) var leaderboardPeriod = "daily"
+
     let config = GameConfig.default
+    let backend = Backend()
     private var dictionary: WordDictionary?
     private let local = LocalStore()
     private var timer: Timer?
     private var lastTick: Date?
     private var lastWholeSecond = -1
 
-    /// Human-facing day number (1-based).
+    private var token: String?
+    private var practiceBoard: DailyBoard?
+    private var runId: String?
+    private var runToken: String?
+    private var runStartDate: Date?
+    private var events: [RunEventDTO] = []
+
+    private var activeBoard: DailyBoard? { isPractice ? practiceBoard : board }
+
     var dayNumber: Int { (board?.dayIndex ?? 0) + 1 }
     var notificationsOn: Bool { local.notificationsOn }
+    var isSignedIn: Bool { account?.isAnonymous == false }
 
-    /// Whether the official once-a-day run has already been played for today's board.
     var playedToday: Bool {
         guard let d = board?.dayIndex else { return false }
         return stats.lastPlayedDayIndex == d
@@ -36,6 +53,7 @@ final class GameStore: ObservableObject {
 
     init() {
         self.stats = LocalStore().loadStats()
+        self.token = Keychain.get("rung.session")
     }
 
     // MARK: load
@@ -58,8 +76,8 @@ final class GameStore: ObservableObject {
                 if self.phase == .loading {
                     self.phase = self.local.hasOnboarded ? .home : .onboarding
                 }
-                // Re-arm the daily reminder if the player previously authorized it.
                 NotificationService.scheduleDailyIfAuthorized()
+                Task { await self.ensureAccount() }
             }
         }
     }
@@ -69,21 +87,72 @@ final class GameStore: ObservableObject {
         phase = .home
     }
 
+    // MARK: account
+
+    private func ensureAccount() async {
+        let device = Keychain.deviceId()
+        if let token, let acc = try? await backend.me(token: token) {
+            account = acc
+            return
+        }
+        if let resp = try? await backend.registerAnon(deviceId: device) {
+            token = resp.token
+            Keychain.set("rung.session", resp.token)
+            account = resp.player
+        }
+    }
+
+    func signInWithApple(identityToken: String, nonce: String) {
+        let device = Keychain.deviceId()
+        Task {
+            if let resp = try? await backend.signInApple(identityToken: identityToken, nonce: nonce, deviceId: device) {
+                token = resp.token
+                Keychain.set("rung.session", resp.token)
+                account = resp.player
+            }
+        }
+    }
+
+    func setUsername(_ name: String) async -> String? {
+        guard let token else { return "Not signed in." }
+        do { account = try await backend.setUsername(token: token, username: name); return nil }
+        catch BackendError.server(_, let msg) { return msg }
+        catch { return "Couldn't set username." }
+    }
+
     // MARK: run lifecycle
 
-    /// Start the daily run. The official run is once per day (blueprint scarcity); pass
-    /// `practice: true` for an extra run that doesn't count toward the day/streak/best —
-    /// useful for playtesting the core loop (Milestone 0).
+    /// Start the daily (ranked) run. The official run is once per day; pass
+    /// `practice: true` for an unlimited Endless run on a random board (not ranked).
     func startCountdown(practice: Bool = false) {
-        guard board != nil, dictionary != nil else { return }
-        if playedToday && !practice { return }
-        isPractice = practice
+        guard let dictionary else { return }
+        if practice {
+            isPractice = true
+            let seed = Int.random(in: 1_000_000_000..<2_000_000_000) // never a real day index
+            practiceBoard = BoardGenerator.generate(dayIndex: seed, dictionary: dictionary, config: config)
+            phase = .countdown
+            return
+        }
+        guard board != nil, !playedToday else { return }
+        isPractice = false
+        runId = nil; runToken = nil
+        // Anchor the run server-side for anti-cheat; resolves during the countdown.
+        if let token {
+            Task {
+                if let s = try? await backend.runStart(token: token) {
+                    runId = s.runId; runToken = s.runToken
+                }
+            }
+        }
         phase = .countdown
     }
 
     func beginRun() {
-        guard let board, let dictionary else { return }
-        run = RunEngine(config: config, board: board, dictionary: dictionary)
+        guard let dictionary, let b = activeBoard else { return }
+        run = RunEngine(config: config, board: b, dictionary: dictionary)
+        runStartDate = Date()
+        events = []
+        serverResult = nil
         lastTick = Date()
         lastWholeSecond = Int(config.clockSeconds.rounded(.up))
         phase = .run
@@ -96,9 +165,15 @@ final class GameStore: ObservableObject {
         let out = r.submit(raw)
         run = r
         switch out {
-        case .accepted:  Haptics.wordValid()
-        case .runEnded:  break
-        default:         Haptics.reject()
+        case .accepted(let word, _, _, _):
+            Haptics.wordValid()
+            if let start = runStartDate {
+                events.append(RunEventDTO(word: word, t_ms: Int(Date().timeIntervalSince(start) * 1000)))
+            }
+        case .runEnded:
+            break
+        default:
+            Haptics.reject()
         }
         return out
     }
@@ -127,25 +202,41 @@ final class GameStore: ObservableObject {
         lastTick = now
         run = r
 
-        // Calm tick haptics in the final 5 seconds, once per whole second (§8.1).
         let whole = Int(r.timeRemaining.rounded(.up))
-        if r.timeRemaining <= 5, whole != lastWholeSecond, whole > 0 {
-            Haptics.tick()
-        }
+        if r.timeRemaining <= 5, whole != lastWholeSecond, whole > 0 { Haptics.tick() }
         lastWholeSecond = whole
 
-        if !r.isRunning { endRun(r.result()) }   // busted out
+        if !r.isRunning { endRun(r.result()) }
     }
 
     private func endRun(_ result: RunResult) {
         timer?.invalidate(); timer = nil
         lastResult = result
-        if !isPractice { recordStats(result) }
+        if !isPractice {
+            recordStats(result)
+            submitDailyRun(result)
+        }
         phase = .result
     }
 
-    /// Called when the app returns to the foreground. Don't charge the time spent in the
-    /// background to a mid-run clock, and roll the board over if the UTC day changed.
+    /// Submit the finished daily run for server-authoritative scoring + ranking. Silently
+    /// no-ops if there's no session or the run wasn't server-anchored (offline) — the run
+    /// still counts locally; it just won't appear on the global leaderboard.
+    private func submitDailyRun(_ result: RunResult) {
+        guard let token, let runId, let runToken, let board else { return }
+        let evs = events
+        let bankMs: Int? = result.outcome == .banked
+            ? Int(Date().timeIntervalSince(runStartDate ?? Date()) * 1000) : nil
+        let day = board.dayIndex
+        Task {
+            if let r = try? await backend.submitRun(token: token, runId: runId, runToken: runToken,
+                                                    dayIndex: day, events: evs, bankT_ms: bankMs) {
+                serverResult = r
+                if let acc = try? await backend.me(token: token) { account = acc }
+            }
+        }
+    }
+
     func handleBecameActive() {
         lastTick = Date()
         guard phase == .home || phase == .result || phase == .onboarding else { return }
@@ -163,9 +254,15 @@ final class GameStore: ObservableObject {
         }
     }
 
-    func goHome() {
-        run = nil
-        phase = .home
+    func goHome() { run = nil; phase = .home }
+
+    // MARK: leaderboard
+
+    func fetchLeaderboard(period: String) {
+        leaderboardPeriod = period
+        Task {
+            if let lb = try? await backend.leaderboard(period: period, token: token) { leaderboard = lb }
+        }
     }
 
     // MARK: stats
@@ -174,11 +271,8 @@ final class GameStore: ObservableObject {
         var s = stats
         let today = result.dayIndex
         if s.lastPlayedDayIndex != today {
-            if let last = s.lastPlayedDayIndex, last == today - 1 {
-                s.currentStreak += 1
-            } else {
-                s.currentStreak = 1
-            }
+            if let last = s.lastPlayedDayIndex, last == today - 1 { s.currentStreak += 1 }
+            else { s.currentStreak = 1 }
             s.lastPlayedDayIndex = today
             s.bestStreak = max(s.bestStreak, s.currentStreak)
         }
