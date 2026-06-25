@@ -109,6 +109,15 @@ struct RunView: View {
 
             Spacer(minLength: 0)
 
+            // Make the gamble legible: banking keeps the multiplier; the clock takes it.
+            if run.baseSum > 0 {
+                Text("If the clock runs out you keep only \(ShareCard.decimal(run.forfeitScore)) — bank to lock your \(ShareCard.mult(run.multiplier)).")
+                    .font(Type.label)
+                    .foregroundStyle(Palette.onInkSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, Metrics.s2)
+            }
+
             // Bank — always gold (§3.3)
             BankButton(amount: run.potentialScore) { store.bank() }
 
