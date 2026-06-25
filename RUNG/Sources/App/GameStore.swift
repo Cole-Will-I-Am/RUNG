@@ -95,17 +95,20 @@ final class GameStore: ObservableObject {
             account = acc
             return
         }
-        if let resp = try? await backend.registerAnon(deviceId: device) {
+        let secret = Keychain.get("rung.deviceSecret")
+        if let resp = try? await backend.registerAnon(deviceId: device, deviceSecret: secret) {
             token = resp.token
             Keychain.set("rung.session", resp.token)
+            if let s = resp.deviceSecret { Keychain.set("rung.deviceSecret", s) }
             account = resp.player
         }
     }
 
     func signInWithApple(identityToken: String, nonce: String) {
         let device = Keychain.deviceId()
+        let secret = Keychain.get("rung.deviceSecret")
         Task {
-            if let resp = try? await backend.signInApple(identityToken: identityToken, nonce: nonce, deviceId: device) {
+            if let resp = try? await backend.signInApple(identityToken: identityToken, nonce: nonce, deviceId: device, deviceSecret: secret) {
                 token = resp.token
                 Keychain.set("rung.session", resp.token)
                 account = resp.player
@@ -125,6 +128,7 @@ final class GameStore: ObservableObject {
     func deleteAccount() async {
         if let token { try? await backend.deleteAccount(token: token) }
         Keychain.delete("rung.session")
+        Keychain.delete("rung.deviceSecret")
         token = nil
         account = nil
         await ensureAccount()

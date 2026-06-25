@@ -6,7 +6,7 @@
 import { DEFAULT_CONFIG, DAY_EPOCH, baseScore, tilesToHistogram, replayRun } from "./engine.js";
 import {
   HttpError, sha256hex, hmacHex, randomToken, randomId,
-  verifyAppleIdentityToken, createSession, authPlayer, makeRunToken, verifyRunToken,
+  verifyAppleIdentityToken, createSession, authPlayer, makeRunToken, verifyRunToken, constantTimeEqual,
 } from "./auth.js";
 
 const BUNDLE_ID = "com.colecantcode.rung";
@@ -26,6 +26,17 @@ const fail = (status, error) => json({ error }, status);
 async function readJson(req) { try { return await req.json(); } catch { return {}; } }
 const nowS = () => Math.floor(Date.now() / 1000);
 const serverDayIndex = () => Math.floor((Date.now() / 1000 - DAY_EPOCH) / 86400);
+
+/// Fixed-window per-IP rate limiter backed by D1. Returns true if under the limit.
+async function rateLimit(env, req, key, limit, windowSec) {
+  const ip = req.headers.get("CF-Connecting-IP") || "0";
+  const bucket = Math.floor(Date.now() / 1000 / windowSec);
+  const k = `${key}:${ip}:${bucket}`;
+  const row = await env.DB.prepare(
+    "INSERT INTO rate(k,n,exp) VALUES(?,1,?) ON CONFLICT(k) DO UPDATE SET n=n+1 RETURNING n"
+  ).bind(k, (bucket + 1) * windowSec).first();
+  return (row?.n ?? 1) <= limit;
+}
 
 const PUBLIC_CONFIG = {
   clockSeconds: DEFAULT_CONFIG.clockSeconds, multiplierStart: DEFAULT_CONFIG.multiplierStart,
@@ -75,15 +86,18 @@ async function hDaily(req, env, url) {
 }
 
 async function hAccount(req, env) {
+  if (!(await rateLimit(env, req, "acct", 20, 3600))) return fail(429, "rate_limited");
   const body = await readJson(req);
+
   if (body.appleIdentityToken) {
     const sub = await verifyAppleIdentityToken(body.appleIdentityToken, body.nonce ?? null, BUNDLE_ID);
     const subKey = await hmacHex(sub, env.APPLE_SUB_PEPPER);
     let p = await env.DB.prepare("SELECT * FROM players WHERE apple_sub = ?").bind(subKey).first();
-    if (!p && body.deviceId) {
-      // Upgrade an existing anonymous player tied to this device.
-      const link = await env.DB.prepare("SELECT player_id FROM device_links WHERE device_id = ?").bind(body.deviceId).first();
-      if (link) {
+    // Merge an anonymous player into this Apple account only when the caller proves the
+    // device with its secret (a leaked deviceId alone can't claim someone's progress).
+    if (!p && body.deviceId && body.deviceSecret) {
+      const link = await env.DB.prepare("SELECT * FROM device_links WHERE device_id = ?").bind(body.deviceId).first();
+      if (link && link.secret_hash && constantTimeEqual(link.secret_hash, await sha256hex(body.deviceSecret))) {
         const anon = await env.DB.prepare("SELECT * FROM players WHERE id = ? AND is_anonymous = 1").bind(link.player_id).first();
         if (anon) {
           await env.DB.prepare("UPDATE players SET apple_sub = ?, is_anonymous = 0 WHERE id = ?").bind(subKey, anon.id).run();
@@ -92,30 +106,36 @@ async function hAccount(req, env) {
       }
     }
     if (!p) p = await newPlayer(env, { apple_sub: subKey, isAnon: 0 });
-    if (body.deviceId) {
-      await env.DB.prepare("INSERT OR IGNORE INTO device_links(device_id, player_id, created_at) VALUES(?,?,?)")
-        .bind(body.deviceId, p.id, nowS()).run();
-    }
     const s = await createSession(env, p.id);
     return ok({ token: s.token, expiresAt: s.expiresAt, player: playerView(p) });
   }
 
-  // Anonymous device registration.
+  // Anonymous device registration / resume — authenticated by a server-issued device
+  // secret, NOT the raw deviceId (which is not a secret).
   const deviceId = body.deviceId;
   if (!deviceId) return fail(400, "missing_deviceId");
-  let p;
-  const link = await env.DB.prepare("SELECT player_id FROM device_links WHERE device_id = ?").bind(deviceId).first();
-  if (link) p = await env.DB.prepare("SELECT * FROM players WHERE id = ?").bind(link.player_id).first();
-  if (!p) {
-    p = await newPlayer(env, { isAnon: 1 });
-    await env.DB.prepare("INSERT OR IGNORE INTO device_links(device_id, player_id, created_at) VALUES(?,?,?)")
-      .bind(deviceId, p.id, nowS()).run();
+  const link = await env.DB.prepare("SELECT * FROM device_links WHERE device_id = ?").bind(deviceId).first();
+  if (link) {
+    if (!body.deviceSecret || !link.secret_hash ||
+        !constantTimeEqual(link.secret_hash, await sha256hex(body.deviceSecret))) {
+      return fail(401, "bad_device_secret");
+    }
+    const p = await env.DB.prepare("SELECT * FROM players WHERE id = ?").bind(link.player_id).first();
+    if (!p) return fail(401, "bad_device_secret");
+    const s = await createSession(env, p.id);
+    return ok({ token: s.token, expiresAt: s.expiresAt, player: playerView(p) });
   }
+  // New device: mint a player + a device secret the client stores for next time.
+  const secret = randomToken(32);
+  const p = await newPlayer(env, { isAnon: 1 });
+  await env.DB.prepare("INSERT OR IGNORE INTO device_links(device_id, player_id, secret_hash, created_at) VALUES(?,?,?,?)")
+    .bind(deviceId, p.id, await sha256hex(secret), nowS()).run();
   const s = await createSession(env, p.id);
-  return ok({ token: s.token, expiresAt: s.expiresAt, player: playerView(p) });
+  return ok({ token: s.token, expiresAt: s.expiresAt, player: playerView(p), deviceSecret: secret });
 }
 
 async function hRunStart(req, env, player) {
+  if (!(await rateLimit(env, req, "start", 60, 3600))) return fail(429, "rate_limited");
   const day = serverDayIndex();
   const b = await getBoard(env, day);
   if (!b) return fail(404, "no_board");
@@ -139,10 +159,10 @@ async function hRun(req, env, player) {
 
   // structural + timing validation
   const bank = bankT_ms == null ? null : Number(bankT_ms);
-  if (bank != null && (bank < 0 || bank > MAX_BANK_MS)) return fail(422, "bad_bank");
+  if (bank != null && (!Number.isFinite(bank) || bank < 0 || bank > MAX_BANK_MS)) return fail(422, "bad_bank");
   let prev = -1;
   for (const e of events) {
-    if (!e || typeof e.word !== "string" || !Number.isInteger(e.t_ms) || e.t_ms < 0) return fail(422, "bad_event");
+    if (!e || typeof e.word !== "string" || e.word.length > 15 || !Number.isInteger(e.t_ms) || e.t_ms < 0) return fail(422, "bad_event");
     if (e.t_ms < prev) return fail(422, "out_of_order");
     if (prev >= 0 && e.t_ms - prev < HARD_MIN_INTER_MS) return fail(422, "impossible_cadence");
     prev = e.t_ms;
@@ -155,11 +175,12 @@ async function hRun(req, env, player) {
   const boardHist = tilesToHistogram(board.tiles);
 
   // dictionary membership for the submitted words (one batched query)
-  const uniq = [...new Set(events.map((e) => String(e.word).trim().toUpperCase()).filter((w) => w.length >= 3))];
+  const uniq = [...new Set(events.map((e) => String(e.word).trim().toUpperCase()).filter((w) => w.length >= 3 && w.length <= 15))];
   const validWords = new Set();
-  if (uniq.length) {
-    const ph = uniq.map(() => "?").join(",");
-    const { results } = await env.DB.prepare(`SELECT word FROM words WHERE word IN (${ph})`).bind(...uniq).all();
+  for (let i = 0; i < uniq.length; i += 90) {   // chunk to stay under D1's bound-param limit
+    const chunk = uniq.slice(i, i + 90);
+    const ph = chunk.map(() => "?").join(",");
+    const { results } = await env.DB.prepare(`SELECT word FROM words WHERE word IN (${ph})`).bind(...chunk).all();
     for (const r of results) validWords.add(r.word);
   }
 
@@ -238,6 +259,7 @@ async function hLeaderboard(req, env, url, player) {
   }
   // daily
   const day = url.searchParams.has("day") ? Number(url.searchParams.get("day")) : serverDayIndex();
+  if (!Number.isInteger(day) || day < 0 || day > serverDayIndex()) return fail(400, "bad_day");
   const { results } = await env.DB.prepare(
     `SELECT p.id, p.username, p.display, r.final_score AS score, r.word_count
      FROM runs r JOIN players p ON p.id = r.player_id
@@ -351,6 +373,7 @@ export default {
     const path = url.pathname;
     const method = req.method.toUpperCase();
     try {
+      if (!env.SESSION_SECRET || !env.APPLE_SUB_PEPPER) return fail(500, "server_misconfigured");
       if (path === "/healthz") return hHealth(req, env);
       if (path === "/" && method === "GET") return hLanding();
       if (path === "/privacy" && method === "GET") return hPrivacy();
@@ -366,7 +389,8 @@ export default {
       return fail(404, "not_found");
     } catch (e) {
       if (e instanceof HttpError) return fail(e.status, e.message);
-      return fail(500, "internal: " + (e && e.message));
+      console.error("internal", e && (e.stack || e.message));
+      return fail(500, "internal_error");
     }
   },
 };

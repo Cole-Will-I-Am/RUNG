@@ -1,0 +1,3 @@
+DELETE FROM runs; DELETE FROM sessions; DELETE FROM device_links; DELETE FROM friendships; DELETE FROM day_stats; DELETE FROM players;
+ALTER TABLE device_links ADD COLUMN secret_hash TEXT;
+CREATE TABLE IF NOT EXISTS rate (k TEXT PRIMARY KEY, n INTEGER NOT NULL, exp INTEGER NOT NULL);

@@ -20,7 +20,12 @@ console.log("playable words chosen:", pick);
 
 const dev = "test-" + Math.floor(Math.random() * 1e9);
 const acct = (await j("/v1/account", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceId: dev }) })).d;
-console.log("account:", acct.player?.display, acct.player?.id, "anon", acct.player?.isAnonymous);
+console.log("account:", acct.player?.display, acct.player?.id, "anon", acct.player?.isAnonymous, "| deviceSecret:", acct.deviceSecret ? "issued" : "MISSING");
+// device-secret auth: deviceId alone must NOT resume; the secret must.
+const noSecret = await j("/v1/account", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceId: dev }) });
+console.log("  resume w/o secret ->", noSecret.status, noSecret.d.error || "");
+const withSecret = (await j("/v1/account", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceId: dev, deviceSecret: acct.deviceSecret }) })).d;
+console.log("  resume w/ secret  -> player", withSecret.player?.id, withSecret.player?.id === acct.player?.id ? "(same ✓)" : "(DIFFERENT!)");
 const auth = { authorization: "Bearer " + acct.token, "content-type": "application/json" };
 
 const start = (await j("/v1/run/start", { method: "POST", headers: auth, body: "{}" })).d;

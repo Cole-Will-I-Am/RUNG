@@ -15,7 +15,7 @@ struct BackendAccount: Codable, Equatable {
     let lastDay: Int?
 }
 
-struct AccountResponse: Codable { let token: String; let expiresAt: Int; let player: BackendAccount }
+struct AccountResponse: Codable { let token: String; let expiresAt: Int; let player: BackendAccount; let deviceSecret: String? }
 struct PlayerWrap: Codable { let player: BackendAccount }
 
 struct RunStartResponse: Codable {
@@ -90,15 +90,15 @@ final class Backend {
 
     private func enc<E: Encodable>(_ v: E) -> Data { (try? JSONEncoder().encode(v)) ?? Data("{}".utf8) }
 
-    func registerAnon(deviceId: String) async throws -> AccountResponse {
-        struct B: Encodable { let deviceId: String }
-        return try await send("/v1/account", method: "POST", bodyData: enc(B(deviceId: deviceId)))
+    func registerAnon(deviceId: String, deviceSecret: String?) async throws -> AccountResponse {
+        struct B: Encodable { let deviceId: String; let deviceSecret: String? }
+        return try await send("/v1/account", method: "POST", bodyData: enc(B(deviceId: deviceId, deviceSecret: deviceSecret)))
     }
 
-    func signInApple(identityToken: String, nonce: String, deviceId: String) async throws -> AccountResponse {
-        struct B: Encodable { let appleIdentityToken: String; let nonce: String; let deviceId: String }
+    func signInApple(identityToken: String, nonce: String, deviceId: String, deviceSecret: String?) async throws -> AccountResponse {
+        struct B: Encodable { let appleIdentityToken: String; let nonce: String; let deviceId: String; let deviceSecret: String? }
         return try await send("/v1/account", method: "POST",
-                              bodyData: enc(B(appleIdentityToken: identityToken, nonce: nonce, deviceId: deviceId)))
+                              bodyData: enc(B(appleIdentityToken: identityToken, nonce: nonce, deviceId: deviceId, deviceSecret: deviceSecret)))
     }
 
     func runStart(token: String) async throws -> RunStartResponse {

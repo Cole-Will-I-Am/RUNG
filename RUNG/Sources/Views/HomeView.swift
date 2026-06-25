@@ -5,6 +5,7 @@ struct HomeView: View {
     @State private var showStats = false
     @State private var showLeaderboard = false
     @State private var showSettings = false
+    @State private var showHowTo = false
 
     private let tileColumns = [GridItem(.adaptive(minimum: 40), spacing: 8)]
 
@@ -13,9 +14,15 @@ struct HomeView: View {
             VStack(alignment: .leading, spacing: Metrics.s6) {
 
                 // Top bar
-                HStack(alignment: .center) {
+                HStack(alignment: .center, spacing: Metrics.s4) {
                     Wordmark(color: Palette.onPaperPrimary, size: 34)
                     Spacer()
+                    Button { showHowTo = true } label: {
+                        Image(systemName: "questionmark.circle")
+                            .font(.system(size: 20, weight: .regular))
+                            .foregroundStyle(Palette.onPaperSecondary)
+                    }
+                    .accessibilityLabel("How to play")
                     Button { showSettings = true } label: {
                         Image(systemName: "gearshape")
                             .font(.system(size: 20, weight: .regular))
@@ -95,5 +102,6 @@ struct HomeView: View {
         .sheet(isPresented: $showStats) { StatsView() }
         .sheet(isPresented: $showLeaderboard) { LeaderboardView() }
         .sheet(isPresented: $showSettings) { SettingsView() }
+        .sheet(isPresented: $showHowTo) { HowToPlayView() }
     }
 }

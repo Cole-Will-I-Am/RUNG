@@ -69,24 +69,37 @@ export class HttpError extends Error {
  * Verify an Apple identity token bound to nonceRaw; returns the stable Apple `sub`.
  * Checks signature, iss, aud (bundle id), exp (±120s skew), and the nonce hash.
  */
+export function constantTimeEqual(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
+  let r = 0;
+  for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return r === 0;
+}
+
 export async function verifyAppleIdentityToken(idToken, nonceRaw, bundleId) {
-  const parts = String(idToken).split(".");
-  if (parts.length !== 3) throw new HttpError(401, "malformed_token");
-  const header = JSON.parse(new TextDecoder().decode(b64urlToBytes(parts[0])));
-  const claims = JSON.parse(new TextDecoder().decode(b64urlToBytes(parts[1])));
-  const key = await appleKey(header.kid);
-  const ok = await crypto.subtle.verify(
-    "RSASSA-PKCS1-v1_5", key, b64urlToBytes(parts[2]), enc(parts[0] + "." + parts[1])
-  );
-  if (!ok) throw new HttpError(401, "bad_signature");
+  let claims;
+  try {
+    const parts = String(idToken).split(".");
+    if (parts.length !== 3) throw 0;
+    const header = JSON.parse(new TextDecoder().decode(b64urlToBytes(parts[0])));
+    claims = JSON.parse(new TextDecoder().decode(b64urlToBytes(parts[1])));
+    if (header.alg !== "RS256" || header.typ !== "JWT") throw 0;   // pin the algorithm
+    const key = await appleKey(header.kid);
+    const ok = await crypto.subtle.verify(
+      "RSASSA-PKCS1-v1_5", key, b64urlToBytes(parts[2]), enc(parts[0] + "." + parts[1])
+    );
+    if (!ok) throw 0;
+  } catch (e) {
+    if (e instanceof HttpError) throw e;        // e.g. apple_key_not_found
+    throw new HttpError(401, "bad_token");      // never leak parse internals
+  }
   if (claims.iss !== "https://appleid.apple.com") throw new HttpError(401, "iss");
   if (claims.aud !== bundleId) throw new HttpError(401, "aud");
   const now = Math.floor(Date.now() / 1000);
   if (typeof claims.exp !== "number" || claims.exp < now - 120) throw new HttpError(401, "expired");
-  if (nonceRaw != null) {
-    const expect = await sha256hex(nonceRaw);
-    if (claims.nonce !== expect) throw new HttpError(401, "nonce");
-  }
+  // Nonce is REQUIRED (fail closed) — the client always sends it; missing nonce = reject.
+  if (!nonceRaw || !claims.nonce) throw new HttpError(401, "nonce_required");
+  if (!constantTimeEqual(claims.nonce, await sha256hex(nonceRaw))) throw new HttpError(401, "nonce");
   return claims.sub;
 }
 
@@ -128,6 +141,6 @@ export async function verifyRunToken(env, token, runId, playerId, dayIndex) {
   const sig = token.slice(dot + 1);
   const payload = `${runId}.${playerId}.${dayIndex}.${serverStartMs}`;
   const expect = await hmacHex(payload, env.RUN_SECRET || env.SESSION_SECRET);
-  if (sig !== expect) throw new HttpError(401, "run_token_mismatch");
+  if (!constantTimeEqual(sig, expect)) throw new HttpError(401, "run_token_mismatch");
   return serverStartMs;
 }

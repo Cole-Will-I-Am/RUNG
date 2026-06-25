@@ -178,11 +178,22 @@ struct SettingsView: View {
     @State private var usernameInput = ""
     @State private var usernameMsg: String?
     @State private var confirmDelete = false
+    @State private var showHowTo = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Metrics.s6) {
                 SheetHeader(title: "Settings") { dismiss() }
+
+                Button { showHowTo = true } label: {
+                    HStack {
+                        Image(systemName: "questionmark.circle")
+                        Text("How to play")
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.system(size: 13)).foregroundStyle(Palette.taupe)
+                    }
+                    .font(Type.body).foregroundStyle(Palette.onPaperPrimary)
+                }
 
                 VStack(alignment: .leading, spacing: Metrics.s3) {
                     Text("Account").font(Type.label).foregroundStyle(Palette.onPaperSecondary)
@@ -258,6 +269,7 @@ struct SettingsView: View {
         } message: {
             Text("This removes your scores, streak, and leaderboard history. This can't be undone.")
         }
+        .sheet(isPresented: $showHowTo) { HowToPlayView() }
         .onAppear { notify = store.notificationsOn; usernameInput = store.account?.username ?? "" }
     }
 
