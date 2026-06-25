@@ -177,6 +177,7 @@ struct SettingsView: View {
     @State private var rawNonce = ""
     @State private var usernameInput = ""
     @State private var usernameMsg: String?
+    @State private var confirmDelete = false
 
     var body: some View {
         ScrollView {
@@ -241,11 +242,22 @@ struct SettingsView: View {
                     Text("Version \(appVersion)")
                         .font(Type.instrumentMicro).foregroundStyle(Palette.taupe)
                 }
+
+                Button(role: .destructive) { confirmDelete = true } label: {
+                    Text("Delete account").font(Type.label)
+                }
+                .tint(Color(hex: 0x9A4A3C))   // desaturated system-danger, distinct from heat (§3.4)
             }
             .padding(Metrics.s6)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Palette.paper.ignoresSafeArea())
+        .alert("Delete your account?", isPresented: $confirmDelete) {
+            Button("Delete", role: .destructive) { Task { await store.deleteAccount() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes your scores, streak, and leaderboard history. This can't be undone.")
+        }
         .onAppear { notify = store.notificationsOn; usernameInput = store.account?.username ?? "" }
     }
 

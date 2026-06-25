@@ -278,6 +278,65 @@ async function hHealth(req, env) {
   return ok({ ok: okBoard && okScore, day0: b0?.tiles, serverDay: serverDayIndex(), scoreCheck: okScore });
 }
 
+async function hDeleteAccount(req, env, player) {
+  // Explicit deletes (don't rely on D1 FK cascade enforcement).
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM runs WHERE player_id = ?").bind(player.id),
+    env.DB.prepare("DELETE FROM sessions WHERE player_id = ?").bind(player.id),
+    env.DB.prepare("DELETE FROM device_links WHERE player_id = ?").bind(player.id),
+    env.DB.prepare("DELETE FROM friendships WHERE player_id = ? OR friend_id = ?").bind(player.id, player.id),
+    env.DB.prepare("DELETE FROM players WHERE id = ?").bind(player.id),
+  ]);
+  return ok({ deleted: true });
+}
+
+// ---------------- static pages (privacy / terms / landing) ----------------
+
+function htmlPage(body) {
+  return new Response(
+    `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
+    `<meta name="viewport" content="width=device-width,initial-scale=1"><title>RUNG</title>` +
+    `<style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;` +
+    `background:#17130E;color:#F6F1E7;max-width:680px;margin:0 auto;padding:44px 22px;line-height:1.62}` +
+    `h1{font-size:30px;margin:.2em 0}h2{margin-top:1.6em}a{color:#F3C04A}.muted{color:#C9BFAE}` +
+    `ul{padding-left:20px}.bars{display:flex;gap:6px;margin-bottom:26px}.bars span{height:7px;width:38px;border-radius:2px}</style>` +
+    `</head><body>${body}</body></html>`,
+    { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=3600" } }
+  );
+}
+const BARS = `<div class="bars"><span style="background:#F3C04A"></span><span style="background:#F0993D"></span><span style="background:#E96B2E"></span><span style="background:#DE3B22"></span></div>`;
+
+function hLanding() {
+  return htmlPage(`${BARS}<h1>RUNG</h1>
+    <p class="muted">A once-a-day competitive word game. The same board for everyone, one 60-second run — bank it, or push your luck.</p>
+    <p><a href="/privacy">Privacy Policy</a> &middot; <a href="/terms">Terms of Use</a></p>`);
+}
+
+function hPrivacy() {
+  return htmlPage(`<h1>RUNG — Privacy Policy</h1><p class="muted">Last updated 24 June 2026.</p>
+    <p>RUNG is a daily word game. We collect the minimum needed to run the game and its leaderboards. We show no ads, use no third-party analytics or tracking, and never sell your data.</p>
+    <h2>What we collect</h2><ul>
+      <li><b>Gameplay data</b> — your scores, words-found count, run timing, and streaks, used to score runs and build leaderboards.</li>
+      <li><b>An account identifier</b> — if you play anonymously, a random identifier generated on your device; if you Sign in with Apple, a one-way hashed identifier derived from Apple. We never receive or store your real name or email.</li>
+      <li><b>A username</b>, only if you choose to set one (shown on leaderboards).</li>
+    </ul>
+    <h2>What we do not collect</h2>
+    <p>No name, email, phone number, contacts, location, photos, or advertising identifier. No cross-app or cross-site tracking.</p>
+    <h2>How we use it</h2>
+    <p>Only to operate the game: validate and score runs, compute daily and all-time leaderboards, show your rank, and maintain your streak. Your username (or an anonymous label) and score are visible to other players on leaderboards.</p>
+    <h2>Where it is stored</h2><p>On Cloudflare, our infrastructure provider, processing the data on our behalf.</p>
+    <h2>Your choices</h2>
+    <p>You can play entirely anonymously without signing in. You can delete your account and all associated data at any time from <b>Settings &rarr; Delete account</b> in the app, or by emailing us.</p>
+    <h2>Children</h2><p>RUNG is not directed to children under 13 and collects no personal information beyond what is described above.</p>
+    <h2>Contact</h2><p>Questions or deletion requests: <a href="mailto:cole@manticthink.com">cole@manticthink.com</a>.</p>`);
+}
+
+function hTerms() {
+  return htmlPage(`<h1>RUNG — Terms of Use</h1><p class="muted">Last updated 24 June 2026.</p>
+    <p>RUNG is provided as-is, for personal entertainment. Play fair: do not cheat, automate, or manipulate the leaderboards — we may remove scores or accounts that do. The daily board and word list are provided without warranty. We may update or discontinue the game at any time. By playing, you agree to these terms.</p>
+    <p>Contact: <a href="mailto:cole@manticthink.com">cole@manticthink.com</a>.</p>`);
+}
+
 // ---------------- router ----------------
 
 async function requireAuth(req, env) {
@@ -293,8 +352,12 @@ export default {
     const method = req.method.toUpperCase();
     try {
       if (path === "/healthz") return hHealth(req, env);
+      if (path === "/" && method === "GET") return hLanding();
+      if (path === "/privacy" && method === "GET") return hPrivacy();
+      if (path === "/terms" && method === "GET") return hTerms();
       if (path === "/v1/daily" && method === "GET") return hDaily(req, env, url);
       if (path === "/v1/account" && method === "POST") return hAccount(req, env);
+      if (path === "/v1/account" && method === "DELETE") return hDeleteAccount(req, env, await requireAuth(req, env));
       if (path === "/v1/run/start" && method === "POST") return hRunStart(req, env, await requireAuth(req, env));
       if (path === "/v1/run" && method === "POST") return hRun(req, env, await requireAuth(req, env));
       if (path === "/v1/leaderboard" && method === "GET") return hLeaderboard(req, env, url, await authPlayer(req, env));

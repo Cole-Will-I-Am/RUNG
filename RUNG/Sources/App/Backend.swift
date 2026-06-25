@@ -59,6 +59,9 @@ struct LeaderboardResponse: Codable, Equatable {
     let me: LeaderboardMe?
 }
 
+private struct ErrorBody: Decodable { let error: String? }
+private struct DeletedResp: Decodable { let deleted: Bool }
+
 enum BackendError: Error { case network; case server(Int, String); case decode }
 
 final class Backend {
@@ -78,8 +81,7 @@ final class Backend {
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw BackendError.network }
         guard (200..<300).contains(http.statusCode) else {
-            struct E: Decodable { let error: String? }
-            let msg = (try? JSONDecoder().decode(E.self, from: data))?.error ?? "http \(http.statusCode)"
+            let msg = (try? JSONDecoder().decode(ErrorBody.self, from: data))?.error ?? "http \(http.statusCode)"
             throw BackendError.server(http.statusCode, msg)
         }
         do { return try JSONDecoder().decode(R.self, from: data) }
@@ -123,5 +125,9 @@ final class Backend {
     func me(token: String) async throws -> BackendAccount {
         let w: PlayerWrap = try await send("/v1/me", token: token)
         return w.player
+    }
+
+    func deleteAccount(token: String) async throws {
+        let _: DeletedResp = try await send("/v1/account", method: "DELETE", token: token)
     }
 }

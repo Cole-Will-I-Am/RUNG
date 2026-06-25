@@ -120,6 +120,16 @@ final class GameStore: ObservableObject {
         catch { return "Couldn't set username." }
     }
 
+    /// Delete the account + all its data (Apple requires in-app deletion), then start
+    /// fresh with a new anonymous identity.
+    func deleteAccount() async {
+        if let token { try? await backend.deleteAccount(token: token) }
+        Keychain.delete("rung.session")
+        token = nil
+        account = nil
+        await ensureAccount()
+    }
+
     // MARK: run lifecycle
 
     /// Start the daily (ranked) run. The official run is once per day; pass
